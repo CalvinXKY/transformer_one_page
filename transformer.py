@@ -29,7 +29,60 @@ def replicate_module(module, copies):
 # Part1: ================== modules ==================
 
 
-class MultiHeadedAttention(nn.Module):
+class Attention(nn.Module):
+    def __init__(self, input_dim, output_dim):
+        super().__init__()
+        self.query = nn.Linear(input_dim, output_dim)
+        self.key = nn.Linear(input_dim, output_dim)
+        self.value = nn.Linear(input_dim, output_dim)
+        self.dk = output_dim
+
+    # Scaled dot-product attention:
+    def self_attention(self, query, key, value, mask):
+        # query/key/value:  (bs,  seq_len, dk)/(bs, heads, seq_len, dk)
+        # mask shape = (bs, 1, seq_len)/(bs, 1, 1, seq_len)
+        scores = torch.matmul(query, key.transpose(-2, -1)) / torch.sqrt(torch.tensor(self.dk)) # (bs, seq_len, seq_len)/(bs, heads, seq_len, seq_len)
+        if mask is not None:
+            scores.masked_fill_(mask == torch.tensor(False), float("-inf"))
+        # Softmax dim=-1 stands for apply the softmax along the last dimension
+        attention_weights = nn.Softmax(dim=-1)(scores)  # (bs, heads, seq_len, seq_len)/(bs, seq_len, seq_len)
+        attention_qkv = torch.matmul(attention_weights, value)   # (bs, seq_len, dk)/(bs, heads, seq_len, dk)
+        return attention_qkv
+
+    def forward(self, query, key, value, mask):
+        # qkv shape: (bs, seq_len, d_model)
+        query = self.query(query)
+        key = self.key(key)
+        value = self.value(value)
+        attention_qkv = self.self_attention(query, key, value, mask)  # shape:  (bs, seq_len, d_model)
+        return attention_qkv
+
+
+class MultiHeadedAttention(Attention):
+    def __init__(self, d_model, heads):
+        super().__init__(d_model, d_model)
+        assert d_model % heads == 0
+        self.dk = d_model // heads  # head dimension
+        self.heads = heads
+        self.out_linear = nn.Linear(d_model, d_model)
+        self.sqrt_dk = torch.sqrt(torch.tensor(self.dk))
+
+    def forward(self, query, key, value, mask):
+        batch_size = query.shape[0]
+        # qkv shape: (bs, seq_len, dk*heads)
+        # dk * heads = d_model
+        query = self.query(query).view(batch_size, -1, self.heads, self.dk).transpose(1, 2)
+        key = self.key(key).view(batch_size, -1, self.heads, self.dk).transpose(1, 2)
+        value = self.value(value).view(batch_size, -1, self.heads, self.dk).transpose(1, 2)
+        attention_qkv = self.self_attention(query, key, value, mask)  # shape:  (bs, heads, seq_len, dk)
+        #  (bs, heads, seq_len, dk) -> (bs, seq_len, dk*heads)
+        reshaped = attention_qkv.transpose(1, 2).reshape(batch_size, -1, self.heads * self.dk)
+        representations_batch = self.out_linear(reshaped)
+        return representations_batch
+
+
+class MultiHeadedAttentionV2(nn.Module):
+    """ Write self_attention into MHA """
     def __init__(self, d_model, heads):
         super().__init__()
         assert d_model % heads == 0
@@ -104,7 +157,7 @@ class Embedding(nn.Module):
 
 
 class PositionwiseFeedForward(nn.Module):
-    def __init__(self, d_model, dff=1024):
+    def __init__(self, d_model, dff=2048):
         super().__init__()
         self.linear1 = nn.Linear(d_model, dff)
         self.linear2 = nn.Linear(dff, d_model)
